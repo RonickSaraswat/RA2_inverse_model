@@ -1,0 +1,16 @@
+numpy
+scipy
+mne
+scikit-learn
+joblib
+tensorflow>=2.10
+matplotlib
+seaborn
+statsmodels
+tqdm
+pyyaml
+tqdm
+h5py
+keras
+pandas
+

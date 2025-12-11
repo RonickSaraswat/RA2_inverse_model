@@ -1,0 +1,16 @@
+# .gitignore
+# Ignore virtual environments and large data
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.npy
+*.h5
+*.keras
+
+# Ignore output folders
+data_out/
+models_out/
+logs/
+checkpoints/

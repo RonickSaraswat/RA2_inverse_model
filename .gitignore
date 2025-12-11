@@ -1,0 +1,20 @@
+﻿# Virtual envs
+.venv/
+venv/
+
+# Data & outputs
+data_out/
+models_out/
+*.h5
+*.npy
+*.keras
+*.hdf5
+*.dll
+
+# IDE / OS files
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+Thumbs.db
+.DS_Store

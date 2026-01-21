@@ -1,16 +1,18 @@
-numpy
+numpy<2.0
 scipy
 mne
 scikit-learn
 joblib
-tensorflow>=2.10
+tensorflow
 matplotlib
-seaborn
-statsmodels
-tqdm
-pyyaml
 tqdm
 h5py
-keras
 pandas
+pyyaml
 
+# optional (only if you use them)
+einops
+transformers
+wandb
+seaborn
+statsmodels

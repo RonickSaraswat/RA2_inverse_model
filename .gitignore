@@ -1,20 +1,27 @@
-﻿# Virtual envs
-.venv/
-venv/
-
-# Data & outputs
-data_out/
-models_out/
-*.h5
-*.npy
-*.keras
-*.hdf5
-*.dll
-
-# IDE / OS files
-.vscode/
-.idea/
+﻿# Python
 __pycache__/
 *.pyc
-Thumbs.db
+*.pyo
+*.pyd
+
+# Environments
+.venv/
+venv/
+.env/
+
+# OS / editor
 .DS_Store
+.vscode/
+.idea/
+
+# Outputs (don’t commit large/generated artifacts)
+data_out/
+models_out/
+plots/
+*.h5
+*.npy
+*.npz
+
+# Logs
+*.log
+wandb/

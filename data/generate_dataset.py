@@ -13,7 +13,7 @@ from simulate.simulator import simulate_eeg
 
 save_path = os.path.join(os.path.dirname(__file__), "synthetic_eeg_dataset.h5")
 
-# ---- Simulation settings ----
+# Simulation settings
 num_samples = 1000
 fs = 250
 duration = 10.0
@@ -28,7 +28,7 @@ n_trials = 10
 sensor_noise_std = 2.0
 input_noise_std = 2.0
 
-# ---- Parameter priors (uniform) ----
+#Parameter priors (uniform) ----
 PRIORS = {
     "A":        (2.0, 5.0),
     "B":        (12.0, 30.0),

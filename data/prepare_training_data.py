@@ -16,7 +16,7 @@ DATA_FILE = os.path.join(BASE_DIR, "data", "synthetic_eeg_dataset.h5")
 OUT_DIR = os.path.join(BASE_DIR, "data_out")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# ---- TFR settings ----
+# TFR settings
 fs = 250
 fmin = 1.0
 fmax = 45.0
@@ -24,11 +24,11 @@ n_freqs = 30
 decim = 4
 n_cycles = None
 
-# ---- Window around stimulus (seconds) ----
+# Window around stimulus (seconds) 
 pre_sec = 1.0
 post_sec = 1.0
 
-# ---- Patch sizes ----
+# Patch sizes 
 FREQ_PATCH = 2
 TIME_PATCH = 5
 
@@ -36,7 +36,7 @@ print("Preparing training data (HYBRID tokens: ERP + TFR patches)...")
 print("Input:", DATA_FILE)
 print("Output:", OUT_DIR)
 
-# ---------- Load data + priors SAFELY ----------
+# Load data + priors SAFELY
 with h5py.File(DATA_FILE, "r") as f:
     eeg = f["EEG"][:]         # (N, C, T)
     params = f["params"][:]   # (N, P)
@@ -58,7 +58,7 @@ print("Param names:", param_names)
 prior_low = np.array([float(priors_attrs[nm][0]) for nm in param_names], dtype=np.float32)
 prior_high = np.array([float(priors_attrs[nm][1]) for nm in param_names], dtype=np.float32)
 
-# ---- Determine shapes from first sample ----
+# Determine shapes from first sample
 tfr0 = extract_features(
     eeg[0],
     fs=fs, fmin=fmin, fmax=fmax, n_freqs=n_freqs, n_cycles=n_cycles, decim=decim

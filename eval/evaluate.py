@@ -22,7 +22,7 @@ from models.param_transforms import sample_theta_from_gaussian_z
 
 eps = 1e-8
 
-# -------- Load data --------
+# Load data
 X = np.load(os.path.join(DATA_OUT, "features.npy"), mmap_mode="r")
 y_theta = np.load(os.path.join(DATA_OUT, "params.npy"), mmap_mode="r")
 
@@ -36,7 +36,7 @@ freq_centers = meta["freq_patch_centers"]
 N, n_tokens, feature_dim = X.shape
 P = y_theta.shape[1]
 
-# -------- Load model + scaler + bounds --------
+# Load model + scaler + bounds 
 model = load_model(os.path.join(MODELS_OUT, "jr_paramtoken_inverse_model.keras"), compile=False)
 
 with open(os.path.join(MODELS_OUT, "scaler.pkl"), "rb") as f:
@@ -47,7 +47,7 @@ param_names = [x.decode("utf-8") for x in bounds["param_names"]]
 low = bounds["prior_low"].astype(np.float32)
 high = bounds["prior_high"].astype(np.float32)
 
-# -------- Split (consistent with training split seed) --------
+# Split (consistent with training split seed)
 idx = np.arange(N)
 _, test_idx, _, y_test = train_test_split(
     idx, np.asarray(y_theta, dtype=np.float32), test_size=0.15, random_state=42
@@ -58,7 +58,7 @@ def scale_X(X_batch):
     flat_s = scaler.transform(flat).astype(np.float32)
     return flat_s.reshape(X_batch.shape[0], n_tokens, feature_dim)
 
-# -------- Predict in chunks --------
+#  Predict in chunks 
 chunk = 128
 preds = []
 for start in range(0, len(test_idx), chunk):
@@ -77,7 +77,7 @@ theta_samps = sample_theta_from_gaussian_z(mu_z, logvar_z, low, high, n_samples=
 theta_mean = theta_samps.mean(axis=0)
 theta_std = theta_samps.std(axis=0)
 
-# -------- Metrics (prof-friendly) --------
+# Metrics (prof-friendly)
 abs_err = np.abs(theta_mean - y_test)
 rel_err = abs_err / (np.abs(y_test) + eps) * 100.0
 
@@ -136,7 +136,7 @@ np.save(os.path.join(PLOTS_DIR, "snr_db.npy"), snr_db)
 np.save(os.path.join(PLOTS_DIR, "coverage90.npy"), coverage)
 np.save(os.path.join(PLOTS_DIR, "contraction.npy"), contr)
 
-# -------- Attention maps (optional) --------
+# Attention maps 
 try:
     attn_model = build_bi_lstm_model(
         n_tokens=n_tokens,

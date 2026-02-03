@@ -1,130 +1,187 @@
 # data/generate_dataset.py
+from __future__ import annotations
+
+import logging
 import os
 import sys
-import numpy as np
+from typing import Dict, Tuple
+
 import h5py
+import numpy as np
 from tqdm import tqdm
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
-from simulate.simulator import simulate_eeg
+from simulate.simulator import simulate_eeg  # noqa: E402
 
-save_path = os.path.join(os.path.dirname(__file__), "synthetic_eeg_dataset.h5")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+LOGGER = logging.getLogger("data.generate_dataset")
 
-# Simulation settings
-num_samples = 1000
-fs = 250
-duration = 10.0
-n_channels = 16
-n_sources = 3
-bandpass = (0.5, 40.0)
+SAVE_PATH = os.path.join(os.path.dirname(__file__), "synthetic_eeg_dataset.h5")
+
+# ---- Simulation settings (defaults preserved) ----
+NUM_SAMPLES = 10_000
+FS = 250
+DURATION = 10.0
+N_CHANNELS = 16
+N_SOURCES = 3
+BANDPASS = (0.5, 40.0)
 
 # ERP settings
-stim_onset = 2.0
-stim_sigma = 0.05
-n_trials = 10
-sensor_noise_std = 2.0
-input_noise_std = 2.0
+STIM_ONSET = 2.0
+STIM_SIGMA = 0.05
+N_TRIALS = 10
+SENSOR_NOISE_STD = 2.0
+INPUT_NOISE_STD = 2.0
 
-#Parameter priors (uniform) ----
-PRIORS = {
-    "A":        (2.0, 5.0),
-    "B":        (12.0, 30.0),
-    "a":        (60.0, 140.0),
-    "b":        (30.0, 90.0),
-    "C":        (90.0, 180.0),
-    "p0":       (80.0, 140.0),
+# ---- Parameter priors (uniform) ----
+PRIORS: Dict[str, Tuple[float, float]] = {
+    "A": (2.0, 5.0),
+    "B": (12.0, 30.0),
+    "a": (60.0, 140.0),
+    "b": (30.0, 90.0),
+    "C": (90.0, 180.0),
+    "p0": (80.0, 140.0),
     "stim_amp": (10.0, 200.0),
 }
 
-param_names = list(PRIORS.keys())
-P = len(param_names)
 
-rng = np.random.default_rng(seed=42)
-n_samples_time = int(fs * duration)
+def _make_fixed_leadfield(
+    n_channels: int,
+    n_sources: int,
+    seed: int,
+) -> np.ndarray:
+    """Create a fixed random leadfield (column-normalized)."""
+    rng = np.random.default_rng(seed=seed)
+    lf = rng.normal(size=(n_channels, n_sources)).astype(np.float32)
+    lf /= (np.linalg.norm(lf, axis=0, keepdims=True) + 1e-9)
+    return lf
 
-print("Generating synthetic Jansen–Rit ERP EEG dataset...")
-print("Saving to:", save_path)
 
-if os.path.exists(save_path):
-    os.remove(save_path)
+def main() -> None:
+    param_names = list(PRIORS.keys())
+    p = len(param_names)
 
-# Fixed leadfield for the entire dataset
-leadfield_seed = 1234
-rng_lf = np.random.default_rng(seed=leadfield_seed)
-leadfield = rng_lf.normal(size=(n_channels, n_sources)).astype(np.float32)
-leadfield /= (np.linalg.norm(leadfield, axis=0, keepdims=True) + 1e-9)
+    # IMPORTANT: store these for reproducibility
+    param_rng_seed = 42
+    leadfield_seed = 1234
 
-with h5py.File(save_path, "w") as f:
-    eeg_ds = f.create_dataset(
-        "EEG",
-        shape=(num_samples, n_channels, n_samples_time),
-        dtype=np.float32,
-        compression="gzip",
-        compression_opts=4,
-        chunks=(1, n_channels, n_samples_time),
-    )
-    params_ds = f.create_dataset(
-        "params",
-        shape=(num_samples, P),
-        dtype=np.float32,
-        compression="gzip",
-        compression_opts=4,
-        chunks=(min(1024, num_samples), P),
-    )
-    seeds_ds = f.create_dataset(
-        "seeds",
-        shape=(num_samples,),
-        dtype=np.uint32,
-        compression="gzip",
-        compression_opts=4,
-        chunks=(min(8192, num_samples),),
+    rng = np.random.default_rng(seed=param_rng_seed)
+    n_samples_time = int(FS * DURATION)
+
+    LOGGER.info("Generating synthetic Jansen–Rit ERP EEG dataset...")
+    LOGGER.info("Saving to: %s", SAVE_PATH)
+
+    tmp_path = SAVE_PATH + ".tmp"
+    if os.path.exists(tmp_path):
+        os.remove(tmp_path)
+
+    # Fixed leadfield for the entire dataset
+    leadfield = _make_fixed_leadfield(
+        n_channels=N_CHANNELS,
+        n_sources=N_SOURCES,
+        seed=leadfield_seed,
     )
 
-    f.create_dataset("leadfield", data=leadfield, dtype=np.float32)
+    try:
+        with h5py.File(tmp_path, "w") as f:
+            eeg_ds = f.create_dataset(
+                "EEG",
+                shape=(NUM_SAMPLES, N_CHANNELS, n_samples_time),
+                dtype=np.float32,
+                compression="gzip",
+                compression_opts=4,
+                chunks=(1, N_CHANNELS, n_samples_time),
+            )
+            params_ds = f.create_dataset(
+                "params",
+                shape=(NUM_SAMPLES, p),
+                dtype=np.float32,
+                compression="gzip",
+                compression_opts=4,
+                chunks=(min(1024, NUM_SAMPLES), p),
+            )
+            seeds_ds = f.create_dataset(
+                "seeds",
+                shape=(NUM_SAMPLES,),
+                dtype=np.uint32,
+                compression="gzip",
+                compression_opts=4,
+                chunks=(min(8192, NUM_SAMPLES),),
+            )
 
-    # metadata
-    f.attrs["fs"] = fs
-    f.attrs["duration"] = duration
-    f.attrs["n_channels"] = n_channels
-    f.attrs["n_sources"] = n_sources
-    f.attrs["bandpass"] = bandpass
-    f.attrs["stim_onset"] = stim_onset
-    f.attrs["stim_sigma"] = stim_sigma
-    f.attrs["n_trials"] = n_trials
-    f.attrs["sensor_noise_std"] = sensor_noise_std
-    f.attrs["input_noise_std"] = input_noise_std
-    f.attrs["param_names"] = np.array(param_names, dtype="S")
+            f.create_dataset("leadfield", data=leadfield, dtype=np.float32)
 
-    prior_grp = f.create_group("priors")
-    for name, (low, high) in PRIORS.items():
-        prior_grp.attrs[name] = (low, high)
+            # ---- Metadata (expanded but backwards compatible) ----
+            f.attrs["forward_model"] = np.array("jansen_rit", dtype="S")
+            f.attrs["fs"] = FS
+            f.attrs["duration"] = DURATION
+            f.attrs["n_channels"] = N_CHANNELS
+            f.attrs["n_sources"] = N_SOURCES
+            f.attrs["bandpass"] = BANDPASS
+            f.attrs["stim_onset"] = STIM_ONSET
+            f.attrs["stim_sigma"] = STIM_SIGMA
+            f.attrs["n_trials"] = N_TRIALS
+            f.attrs["sensor_noise_std"] = SENSOR_NOISE_STD
+            f.attrs["input_noise_std"] = INPUT_NOISE_STD
+            f.attrs["param_names"] = np.array(param_names, dtype="S")
 
-    for i in tqdm(range(num_samples), desc="Simulating EEG", unit="sample"):
-        params = {name: rng.uniform(low, high) for name, (low, high) in PRIORS.items()}
+            # reproducibility
+            f.attrs["param_rng_seed"] = int(param_rng_seed)
+            f.attrs["leadfield_seed"] = int(leadfield_seed)
 
-        seed_i = np.uint32(rng.integers(0, np.iinfo(np.uint32).max, dtype=np.uint32))
-        eeg = simulate_eeg(
-            params=params,
-            fs=fs,
-            duration=duration,
-            n_channels=n_channels,
-            seed=int(seed_i),
-            bandpass=bandpass,
-            stim_onset=stim_onset,
-            stim_sigma=stim_sigma,
-            n_sources=n_sources,
-            leadfield=leadfield,
-            sensor_noise_std=sensor_noise_std,
-            n_trials=n_trials,
-            input_noise_std=input_noise_std,
-        )
+            prior_grp = f.create_group("priors")
+            for name, (low, high) in PRIORS.items():
+                prior_grp.attrs[name] = (float(low), float(high))
 
-        eeg_ds[i] = eeg
-        params_ds[i] = np.array([params[k] for k in param_names], dtype=np.float32)
-        seeds_ds[i] = seed_i
+            # ---- Generate ----
+            for i in tqdm(range(NUM_SAMPLES), desc="Simulating EEG", unit="sample"):
+                params = {name: float(rng.uniform(lo, hi)) for name, (lo, hi) in PRIORS.items()}
 
-print("Done.")
-print("Saved:", save_path)
+                # per-sample seed for sensor/input noise streams inside simulate_eeg()
+                seed_i = np.uint32(
+                    rng.integers(0, np.iinfo(np.uint32).max, dtype=np.uint32)
+                )
+
+                eeg = simulate_eeg(
+                    params=params,
+                    fs=FS,
+                    duration=DURATION,
+                    n_channels=N_CHANNELS,
+                    seed=int(seed_i),
+                    bandpass=BANDPASS,
+                    stim_onset=STIM_ONSET,
+                    stim_sigma=STIM_SIGMA,
+                    n_sources=N_SOURCES,
+                    leadfield=leadfield,
+                    sensor_noise_std=SENSOR_NOISE_STD,
+                    n_trials=N_TRIALS,
+                    input_noise_std=INPUT_NOISE_STD,
+                )
+
+                eeg_ds[i] = eeg
+                params_ds[i] = np.array([params[k] for k in param_names], dtype=np.float32)
+                seeds_ds[i] = seed_i
+
+        # Atomic replace
+        if os.path.exists(SAVE_PATH):
+            os.remove(SAVE_PATH)
+        os.replace(tmp_path, SAVE_PATH)
+
+    except Exception:
+        # Clean up tmp file on error
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+    LOGGER.info("Done.")
+    LOGGER.info("Saved: %s", SAVE_PATH)
+
+
+if __name__ == "__main__":
+    main()

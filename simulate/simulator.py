@@ -1,25 +1,41 @@
-# simulate/simulator.py
+#simulate/simulator.py
+from __future__ import annotations
+
+import logging
+from typing import Dict, Optional, Tuple, Union
+
 import numpy as np
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, resample_poly
+
+LOGGER = logging.getLogger(__name__)
 
 
-def _sigmoid(v, e0=2.5, v0=6.0, r=0.56):
-    # Jansen-Rit sigmoid (firing rate)
-    return 2.0 * e0 / (1.0 + np.exp(r * (v0 - v)))
+def _sigmoid(v: np.ndarray, e0: float = 2.5, v0: float = 6.0, r: float = 0.56) -> np.ndarray:
+    """
+    Jansen–Rit sigmoid firing-rate function.
+
+    Notes:
+    - Clipping avoids overflow at extreme v.
+    """
+    v = np.asarray(v, dtype=np.float64)
+    x = r * (v0 - v)
+    x = np.clip(x, -60.0, 60.0)
+    return (2.0 * e0) / (1.0 + np.exp(x))
 
 
 def _jr_one_source(
-    params,
-    internal_fs,
-    duration,
-    stim_onset,
-    stim_sigma,
-    input_noise_std,
-    seed=None,
-):
+    params: Dict[str, float],
+    internal_fs: int,
+    duration: float,
+    stim_onset: float,
+    stim_sigma: float,
+    input_noise_std: float,
+    seed: Optional[int] = None,
+) -> np.ndarray:
     """
     Simulate a single Jansen–Rit cortical column (one source).
-    Returns pyramidal potential proxy (mV-ish) at internal_fs.
+
+    Returns pyramidal proxy v_pyr(t) = y1 - y2 at internal_fs.
     """
     rng = np.random.default_rng(seed)
 
@@ -39,45 +55,38 @@ def _jr_one_source(
 
     dt = 1.0 / float(internal_fs)
     n_int = int(np.round(duration * internal_fs))
-    t = np.arange(n_int, dtype=np.float64) * dt
+    if n_int <= 1:
+        raise ValueError(f"Duration too small: duration={duration} internal_fs={internal_fs}")
 
+    t = np.arange(n_int, dtype=np.float64) * dt
     stim = stim_amp * np.exp(-0.5 * ((t - stim_onset) / (stim_sigma + 1e-12)) ** 2)
     p = p0 + stim + rng.normal(0.0, input_noise_std, size=n_int)
-    p = np.maximum(p, 0.0)  # keep nonnegative drive
+    p = np.maximum(p, 0.0)
 
     # States: y0,y1,y2 and derivatives y3,y4,y5
-    y0 = 0.0
-    y1 = 0.0
-    y2 = 0.0
+    y0 = 0.01 * rng.normal()
+    y1 = 0.01 * rng.normal()
+    y2 = 0.01 * rng.normal()
     y3 = 0.0
     y4 = 0.0
     y5 = 0.0
 
     out = np.zeros(n_int, dtype=np.float64)
 
-    # Small random initial condition helps break symmetry
-    y0 += 0.01 * rng.normal()
-    y1 += 0.01 * rng.normal()
-    y2 += 0.01 * rng.normal()
-
     for i in range(n_int):
-        # pyramidal membrane potential proxy
         v_pyr = y1 - y2
-
         S_pyr = _sigmoid(v_pyr)
         S_y0 = _sigmoid(C1 * y0)
 
-        # JR ODEs (second-order PSP kernels expanded to first-order system)
         dy0 = y3
-        dy3 = A * a * S_pyr - 2.0 * a * y3 - (a ** 2) * y0
+        dy3 = A * a * S_pyr - 2.0 * a * y3 - (a**2) * y0
 
         dy1 = y4
-        dy4 = A * a * (p[i] + C2 * S_y0) - 2.0 * a * y4 - (a ** 2) * y1
+        dy4 = A * a * (p[i] + C2 * S_y0) - 2.0 * a * y4 - (a**2) * y1
 
         dy2 = y5
-        dy5 = B * b * (C4 * _sigmoid(C3 * y0)) - 2.0 * b * y5 - (b ** 2) * y2
+        dy5 = B * b * (C4 * _sigmoid(C3 * y0)) - 2.0 * b * y5 - (b**2) * y2
 
-        # Euler integration (stable at internal_fs=1000 for your ranges)
         y0 += dt * dy0
         y3 += dt * dy3
         y1 += dt * dy1
@@ -90,94 +99,192 @@ def _jr_one_source(
     return out
 
 
+def _compute_baseline_indices(
+    fs: int,
+    n_out: int,
+    stim_onset: float,
+    baseline_window: Optional[Tuple[float, float]],
+) -> slice:
+    """
+    Baseline indices for baseline correction.
+
+    baseline_window:
+      - None: use [0, stim_onset) (legacy behavior)
+      - (tmin, tmax): relative to stim_onset, i.e. [stim_onset+tmin, stim_onset+tmax)
+        Example: (-0.2, 0.0) means last 200ms pre-stim.
+    """
+    if baseline_window is None:
+        end = int(max(1, np.round(stim_onset * fs)))
+        end = min(end, n_out)
+        return slice(0, end)
+
+    tmin_rel, tmax_rel = float(baseline_window[0]), float(baseline_window[1])
+    if tmax_rel <= tmin_rel:
+        raise ValueError(f"Invalid baseline_window={baseline_window}. Need tmax > tmin.")
+
+    start_t = stim_onset + tmin_rel
+    end_t = stim_onset + tmax_rel
+    start = int(np.round(start_t * fs))
+    end = int(np.round(end_t * fs))
+    start = max(0, min(start, n_out))
+    end = max(0, min(end, n_out))
+
+    if end <= start:
+        raise ValueError(
+            f"Baseline window outside range: baseline_window={baseline_window}, stim_onset={stim_onset}, "
+            f"fs={fs}, n_out={n_out} -> start={start}, end={end}"
+        )
+    return slice(start, end)
+
+
 def simulate_eeg(
-    params,
-    fs=250,
-    duration=10.0,
-    n_channels=16,
-    seed=None,
-    bandpass=(0.5, 40.0),
-    stim_onset=2.0,
-    stim_sigma=0.05,
-    n_sources=3,
-    leadfield=None,
-    sensor_noise_std=2.0,
-    n_trials=10,
-    input_noise_std=2.0,
-    internal_fs=1000,
-    baseline_correct=True,
-    uV_scale=1000.0,
-):
+    params: Dict[str, float],
+    fs: int = 250,
+    duration: float = 10.0,
+    n_channels: int = 16,
+    seed: Optional[int] = None,
+    bandpass: Optional[Tuple[float, float]] = (0.5, 40.0),
+    stim_onset: float = 2.0,
+    stim_sigma: float = 0.05,
+    n_sources: int = 3,
+    leadfield: Optional[np.ndarray] = None,
+    sensor_noise_std: float = 2.0,
+    n_trials: int = 10,
+    input_noise_std: float = 2.0,
+    internal_fs: int = 1000,
+    baseline_correct: bool = True,
+    baseline_window: Optional[Tuple[float, float]] = None,
+    warmup_sec: float = 0.0,
+    downsample_method: str = "slice",
+    uV_scale: float = 1000.0,
+    return_trials: bool = False,
+    return_sources: bool = False,
+) -> Union[np.ndarray, Dict[str, np.ndarray]]:
     """
     Jansen–Rit ERP EEG forward simulator.
 
-    Key point for identifiability:
-      - NO per-trial standardization (no division by std).
-      - Baseline correction is allowed and recommended.
+    - No per-trial standardization (important for identifiability).
+    - Optional warm-up to avoid init transients contaminating baseline.
+    - Optional baseline window relative to stimulus (ERP-standard).
+    - Optional polyphase downsampling to reduce aliasing.
+
+    Returns EEG (channels, time) unless return_trials/return_sources True.
     """
+    if fs <= 0:
+        raise ValueError(f"fs must be positive, got {fs}")
+    if duration <= 0:
+        raise ValueError(f"duration must be positive, got {duration}")
+    if n_channels <= 0 or n_sources <= 0:
+        raise ValueError(f"n_channels and n_sources must be positive, got {n_channels}, {n_sources}")
+    if n_trials <= 0:
+        raise ValueError(f"n_trials must be positive, got {n_trials}")
+    if warmup_sec < 0:
+        raise ValueError(f"warmup_sec must be >= 0, got {warmup_sec}")
+
     rng = np.random.default_rng(seed)
 
     if internal_fs % fs != 0:
         raise ValueError("internal_fs must be an integer multiple of fs (e.g., 1000 and 250).")
     ds = internal_fs // fs
 
-    n_int = int(np.round(duration * internal_fs))
     n_out = int(np.round(duration * fs))
+    if n_out <= 1:
+        raise ValueError(f"duration too small: duration={duration}, fs={fs} -> n_out={n_out}")
+
+    n_warm_out = int(np.round(warmup_sec * fs))
+    total_out = n_warm_out + n_out
+    total_duration = total_out / float(fs)
+
+    stim_onset_total = stim_onset + (n_warm_out / float(fs))
+
+    n_int_total = total_out * ds
+    n_warm_int = n_warm_out * ds
 
     if leadfield is None:
-        # fixed but random mixing if not provided
         lf = rng.normal(size=(n_channels, n_sources)).astype(np.float32)
         lf /= (np.linalg.norm(lf, axis=0, keepdims=True) + 1e-9)
         leadfield = lf
     else:
         leadfield = np.asarray(leadfield, dtype=np.float32)
-        assert leadfield.shape == (n_channels, n_sources)
+        if leadfield.shape != (n_channels, n_sources):
+            raise ValueError(f"leadfield must have shape {(n_channels, n_sources)}, got {leadfield.shape}")
+
+    eeg_trials = [] if return_trials else None
+    sources_trials = [] if return_sources else None
 
     eeg_acc = np.zeros((n_channels, n_out), dtype=np.float64)
 
-    # Trial averaging (ERP-like)
-    for tr in range(int(n_trials)):
-        # independent seeds per trial and source
-        src = np.zeros((n_sources, n_int), dtype=np.float64)
+    for _tr in range(int(n_trials)):
+        src = np.zeros((n_sources, n_int_total), dtype=np.float64)
         for s in range(n_sources):
             s_seed = int(rng.integers(0, np.iinfo(np.int32).max))
             src[s] = _jr_one_source(
                 params=params,
                 internal_fs=internal_fs,
-                duration=duration,
-                stim_onset=stim_onset,
+                duration=total_duration,
+                stim_onset=stim_onset_total,
                 stim_sigma=stim_sigma,
                 input_noise_std=input_noise_std,
                 seed=s_seed,
             )
 
-        # downsample sources to sensor fs
-        src_ds = src[:, ::ds]  # (n_sources, n_out)
+        if n_warm_int > 0:
+            src_use = src[:, n_warm_int:n_warm_int + n_out * ds]
+        else:
+            src_use = src[:, :n_out * ds]
 
-        # mix to sensors and scale to uV
-        eeg = (leadfield @ src_ds) * uV_scale  # (n_channels, n_out)
+        if downsample_method == "slice":
+            src_ds = src_use[:, ::ds]
+        elif downsample_method == "poly":
+            src_ds = resample_poly(src_use, up=1, down=ds, axis=1)
+        else:
+            raise ValueError(f"Invalid downsample_method={downsample_method}. Use 'slice' or 'poly'.")
 
-        # add sensor noise (uV)
+        if src_ds.shape[1] > n_out:
+            src_ds = src_ds[:, :n_out]
+        elif src_ds.shape[1] < n_out:
+            pad = n_out - src_ds.shape[1]
+            src_ds = np.pad(src_ds, ((0, 0), (0, pad)), mode="edge")
+
+        eeg = (leadfield @ src_ds) * float(uV_scale)
         eeg += rng.normal(0.0, sensor_noise_std, size=eeg.shape)
 
         eeg_acc += eeg
 
-    eeg = (eeg_acc / float(n_trials)).astype(np.float64)
+        if return_trials and eeg_trials is not None:
+            eeg_trials.append(eeg.astype(np.float32))
+        if return_sources and sources_trials is not None:
+            sources_trials.append(src_ds.astype(np.float32))
 
-    # Baseline correction (pre-stim mean)
+    eeg_avg = (eeg_acc / float(n_trials)).astype(np.float64)
+
     if baseline_correct:
-        pre = int(max(1, np.round(stim_onset * fs)))
-        base = eeg[:, :pre].mean(axis=1, keepdims=True)
-        eeg = eeg - base
+        bl_slice = _compute_baseline_indices(
+            fs=fs,
+            n_out=n_out,
+            stim_onset=stim_onset,
+            baseline_window=baseline_window,
+        )
+        base = eeg_avg[:, bl_slice].mean(axis=1, keepdims=True)
+        eeg_avg = eeg_avg - base
 
-    # Bandpass (optional)
     if bandpass is not None:
-        lo, hi = bandpass
+        lo, hi = float(bandpass[0]), float(bandpass[1])
         nyq = 0.5 * fs
         lo_n = max(1e-6, lo / nyq)
         hi_n = min(0.999, hi / nyq)
         if lo_n < hi_n:
             b, a = butter(4, [lo_n, hi_n], btype="band")
-            eeg = filtfilt(b, a, eeg, axis=1)
+            eeg_avg = filtfilt(b, a, eeg_avg, axis=1)
 
-    return eeg.astype(np.float32)
+    eeg_avg = eeg_avg.astype(np.float32)
+
+    if not return_trials and not return_sources:
+        return eeg_avg
+
+    out: Dict[str, np.ndarray] = {"eeg": eeg_avg}
+    if return_trials and eeg_trials is not None:
+        out["eeg_trials"] = np.stack(eeg_trials, axis=0).astype(np.float32)
+    if return_sources and sources_trials is not None:
+        out["sources"] = np.stack(sources_trials, axis=0).astype(np.float32)
+    return out

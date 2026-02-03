@@ -9,18 +9,40 @@ from scipy.signal import butter, filtfilt, resample_poly
 
 LOGGER = logging.getLogger(__name__)
 
+JR_REQUIRED_KEYS = ("A", "B", "a", "b", "C", "p0", "stim_amp")
 
-def _sigmoid(v: np.ndarray, e0: float = 2.5, v0: float = 6.0, r: float = 0.56) -> np.ndarray:
+
+def _validate_jr_params(params: Dict[str, float]) -> None:
+    missing = [k for k in JR_REQUIRED_KEYS if k not in params]
+    if missing:
+        raise KeyError(
+            f"Jansen–Rit params missing keys: {missing}. "
+            f"Required keys: {list(JR_REQUIRED_KEYS)}"
+        )
+
+
+def _sigmoid_jr(v: np.ndarray, e0: float = 2.5, v0: float = 6.0, r: float = 0.56) -> np.ndarray:
     """
-    Jansen–Rit sigmoid firing-rate function.
-
-    Notes:
-    - Clipping avoids overflow at extreme v.
+    Jansen–Rit sigmoid firing-rate function with overflow-safe clipping.
     """
     v = np.asarray(v, dtype=np.float64)
     x = r * (v0 - v)
     x = np.clip(x, -60.0, 60.0)
     return (2.0 * e0) / (1.0 + np.exp(x))
+
+
+def _match_len_1d(x: np.ndarray, n: int) -> np.ndarray:
+    """
+    Ensure a 1D array has length n via truncation or edge padding.
+    This avoids rare rounding mismatches between duration*fs and integer lengths.
+    """
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    if x.shape[0] == n:
+        return x
+    if x.shape[0] > n:
+        return x[:n]
+    pad = n - x.shape[0]
+    return np.pad(x, (0, pad), mode="edge")
 
 
 def _jr_one_source(
@@ -37,6 +59,7 @@ def _jr_one_source(
 
     Returns pyramidal proxy v_pyr(t) = y1 - y2 at internal_fs.
     """
+    _validate_jr_params(params)
     rng = np.random.default_rng(seed)
 
     A = float(params["A"])
@@ -47,6 +70,15 @@ def _jr_one_source(
     p0 = float(params["p0"])
     stim_amp = float(params["stim_amp"])
 
+    if internal_fs <= 0:
+        raise ValueError(f"internal_fs must be positive, got {internal_fs}")
+    if duration <= 0:
+        raise ValueError(f"duration must be positive, got {duration}")
+    if stim_sigma <= 0:
+        raise ValueError(f"stim_sigma must be positive, got {stim_sigma}")
+    if input_noise_std < 0:
+        raise ValueError(f"input_noise_std must be >= 0, got {input_noise_std}")
+
     # Canonical JR connectivity proportions
     C1 = 1.0 * C
     C2 = 0.8 * C
@@ -55,10 +87,11 @@ def _jr_one_source(
 
     dt = 1.0 / float(internal_fs)
     n_int = int(np.round(duration * internal_fs))
-    if n_int <= 1:
+    if n_int <= 2:
         raise ValueError(f"Duration too small: duration={duration} internal_fs={internal_fs}")
 
     t = np.arange(n_int, dtype=np.float64) * dt
+
     stim = stim_amp * np.exp(-0.5 * ((t - stim_onset) / (stim_sigma + 1e-12)) ** 2)
     p = p0 + stim + rng.normal(0.0, input_noise_std, size=n_int)
     p = np.maximum(p, 0.0)
@@ -73,10 +106,11 @@ def _jr_one_source(
 
     out = np.zeros(n_int, dtype=np.float64)
 
+    # Forward Euler (stable for your dt with internal_fs=1000 and your parameter ranges)
     for i in range(n_int):
         v_pyr = y1 - y2
-        S_pyr = _sigmoid(v_pyr)
-        S_y0 = _sigmoid(C1 * y0)
+        S_pyr = _sigmoid_jr(v_pyr)
+        S_y0 = _sigmoid_jr(C1 * y0)
 
         dy0 = y3
         dy3 = A * a * S_pyr - 2.0 * a * y3 - (a**2) * y0
@@ -85,7 +119,7 @@ def _jr_one_source(
         dy4 = A * a * (p[i] + C2 * S_y0) - 2.0 * a * y4 - (a**2) * y1
 
         dy2 = y5
-        dy5 = B * b * (C4 * _sigmoid(C3 * y0)) - 2.0 * b * y5 - (b**2) * y2
+        dy5 = B * b * (C4 * _sigmoid_jr(C3 * y0)) - 2.0 * b * y5 - (b**2) * y2
 
         y0 += dt * dy0
         y3 += dt * dy3
@@ -170,6 +204,8 @@ def simulate_eeg(
 
     Returns EEG (channels, time) unless return_trials/return_sources True.
     """
+    _validate_jr_params(params)
+
     if fs <= 0:
         raise ValueError(f"fs must be positive, got {fs}")
     if duration <= 0:
@@ -180,6 +216,8 @@ def simulate_eeg(
         raise ValueError(f"n_trials must be positive, got {n_trials}")
     if warmup_sec < 0:
         raise ValueError(f"warmup_sec must be >= 0, got {warmup_sec}")
+    if sensor_noise_std < 0:
+        raise ValueError(f"sensor_noise_std must be >= 0, got {sensor_noise_std}")
 
     rng = np.random.default_rng(seed)
 
@@ -188,7 +226,7 @@ def simulate_eeg(
     ds = internal_fs // fs
 
     n_out = int(np.round(duration * fs))
-    if n_out <= 1:
+    if n_out <= 2:
         raise ValueError(f"duration too small: duration={duration}, fs={fs} -> n_out={n_out}")
 
     n_warm_out = int(np.round(warmup_sec * fs))
@@ -197,9 +235,11 @@ def simulate_eeg(
 
     stim_onset_total = stim_onset + (n_warm_out / float(fs))
 
+    # Exact internal length to align with output grid
     n_int_total = total_out * ds
     n_warm_int = n_warm_out * ds
 
+    # Leadfield
     if leadfield is None:
         lf = rng.normal(size=(n_channels, n_sources)).astype(np.float32)
         lf /= (np.linalg.norm(lf, axis=0, keepdims=True) + 1e-9)
@@ -216,9 +256,10 @@ def simulate_eeg(
 
     for _tr in range(int(n_trials)):
         src = np.zeros((n_sources, n_int_total), dtype=np.float64)
+
         for s in range(n_sources):
             s_seed = int(rng.integers(0, np.iinfo(np.int32).max))
-            src[s] = _jr_one_source(
+            src_s = _jr_one_source(
                 params=params,
                 internal_fs=internal_fs,
                 duration=total_duration,
@@ -227,24 +268,27 @@ def simulate_eeg(
                 input_noise_std=input_noise_std,
                 seed=s_seed,
             )
+            src[s] = _match_len_1d(src_s, n_int_total)
 
+        # Discard warm-up if requested
         if n_warm_int > 0:
-            src_use = src[:, n_warm_int:n_warm_int + n_out * ds]
+            src_use = src[:, n_warm_int : n_warm_int + n_out * ds]
         else:
-            src_use = src[:, :n_out * ds]
+            src_use = src[:, : n_out * ds]
 
+        # Downsample sources to sensor fs
         if downsample_method == "slice":
             src_ds = src_use[:, ::ds]
         elif downsample_method == "poly":
             src_ds = resample_poly(src_use, up=1, down=ds, axis=1)
         else:
-            raise ValueError(f"Invalid downsample_method={downsample_method}. Use 'slice' or 'poly'.")
+            raise ValueError("downsample_method must be 'slice' or 'poly'")
 
+        # Ensure exact length n_out
         if src_ds.shape[1] > n_out:
             src_ds = src_ds[:, :n_out]
         elif src_ds.shape[1] < n_out:
-            pad = n_out - src_ds.shape[1]
-            src_ds = np.pad(src_ds, ((0, 0), (0, pad)), mode="edge")
+            src_ds = np.pad(src_ds, ((0, 0), (0, n_out - src_ds.shape[1])), mode="edge")
 
         eeg = (leadfield @ src_ds) * float(uV_scale)
         eeg += rng.normal(0.0, sensor_noise_std, size=eeg.shape)
@@ -258,6 +302,7 @@ def simulate_eeg(
 
     eeg_avg = (eeg_acc / float(n_trials)).astype(np.float64)
 
+    # Baseline correction (ERP standard)
     if baseline_correct:
         bl_slice = _compute_baseline_indices(
             fs=fs,
@@ -265,9 +310,9 @@ def simulate_eeg(
             stim_onset=stim_onset,
             baseline_window=baseline_window,
         )
-        base = eeg_avg[:, bl_slice].mean(axis=1, keepdims=True)
-        eeg_avg = eeg_avg - base
+        eeg_avg -= eeg_avg[:, bl_slice].mean(axis=1, keepdims=True)
 
+    # Bandpass (optional)
     if bandpass is not None:
         lo, hi = float(bandpass[0]), float(bandpass[1])
         nyq = 0.5 * fs
